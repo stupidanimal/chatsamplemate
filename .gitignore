@@ -22,8 +22,11 @@ config.json
 *.env
 
 # Assets (user can replace)
-assets/emotions/*.png
-!assets/emotions/.gitkeep
+assets/emotions/**/*.png
+assets/emotions_new/
+assets/characters/*.png
+assets/samples/*.png
+!assets/**/.gitkeep
 
 # Logs
 *.log

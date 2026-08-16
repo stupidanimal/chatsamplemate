@@ -24,6 +24,7 @@ class AICompanion:
         self.config = self.load_json("config.json")
         self.prompt_config = self.load_json("prompt.json")
         
+        self.provider = self.config.get("provider", "deepseek")
         self.api_key = self.config.get("api_key", "")
         self.api_url = self.config.get("api_url", "https://api.deepseek.com/v1/chat/completions")
         self.model = self.config.get("model", "deepseek-chat")
@@ -35,7 +36,10 @@ class AICompanion:
         self.emotion_pattern = self.prompt_config.get("emotion_pattern", "")
         
         # 资源路径
-        self.assets_dir = Path(__file__).parent.parent / "assets" / "emotions"
+        self.assets_base = Path(__file__).parent.parent / "assets"
+        self.characters_dir = self.assets_base / "characters"
+        self.emotions_base = self.assets_base / "emotions"
+        self.current_style = self.config.get("character_style", "luna")
         self.current_emotion = "默认"
         
         # 对话历史
@@ -59,7 +63,9 @@ class AICompanion:
         """生成系统提示词"""
         template = self.prompt_config.get("system_prompt", "")
         emotions_list = " ".join([f"[{e}]" for e in self.emotions.keys() if e != "说话"])
-        return template.format(personality=self.personality, emotions=emotions_list)
+        # 角色名首字母大写
+        name = self.current_style.capitalize()
+        return template.format(name=name, personality=self.personality, emotions=emotions_list)
 
     def setup_ui(self):
         # 主框架
@@ -99,17 +105,26 @@ class AICompanion:
         bottom_frame.pack(fill=tk.X, pady=(10, 0))
         
         ttk.Button(bottom_frame, text="设置", command=self.show_settings).pack(side=tk.LEFT)
-        ttk.Button(bottom_frame, text="更换头像", command=self.change_avatar).pack(side=tk.RIGHT)
+
+    def get_available_styles(self):
+        """获取可用的角色风格列表"""
+        styles = []
+        if self.emotions_base.exists():
+            for d in self.emotions_base.iterdir():
+                if d.is_dir():
+                    styles.append(d.name)
+        return sorted(styles) if styles else ["style1"]
 
     def load_emotion(self, emotion):
         """加载情绪对应的头像"""
         self.current_emotion = emotion
         
         # 查找对应的图片文件
+        style_dir = self.emotions_base / self.current_style
         if emotion in self.emotions:
-            img_path = self.assets_dir / self.emotions[emotion]
+            img_path = style_dir / self.emotions[emotion]
         else:
-            img_path = self.assets_dir / "default.png"
+            img_path = style_dir / "default.png"
         
         # 如果图片不存在，创建一个占位图
         if not img_path.exists():
@@ -139,8 +154,10 @@ class AICompanion:
         color = colors.get(emotion, "#4A90D9")
         img = Image.new('RGB', (150, 150), color)
         
-        # 保存到assets目录
-        img_path = self.assets_dir / self.emotions.get(emotion, "default.png")
+        # 保存到当前风格目录
+        style_dir = self.emotions_base / self.current_style
+        style_dir.mkdir(parents=True, exist_ok=True)
+        img_path = style_dir / self.emotions.get(emotion, "default.png")
         img.save(img_path)
 
     def parse_emotion(self, text):
@@ -182,10 +199,12 @@ class AICompanion:
         try:
             self.messages.append({"role": "user", "content": user_input})
             
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
+            headers = {"Content-Type": "application/json"}
+            if self.provider == "deepseek" and self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            
+            # 绕过 localhost 代理
+            proxies = {"http": None, "https": None} if "localhost" in self.api_url or "127.0.0.1" in self.api_url else None
             
             data = {
                 "model": self.model,
@@ -197,7 +216,7 @@ class AICompanion:
             # 显示"说话中"状态
             self.root.after(0, lambda: self.load_emotion("说话"))
             
-            response = requests.post(self.api_url, headers=headers, json=data, timeout=30)
+            response = requests.post(self.api_url, headers=headers, json=data, timeout=30, proxies=proxies)
             response.raise_for_status()
             
             ai_response = response.json()["choices"][0]["message"]["content"]
@@ -266,15 +285,52 @@ class AICompanion:
         """显示设置对话框"""
         settings_window = tk.Toplevel(self.root)
         settings_window.title("设置")
-        settings_window.geometry("300x250")
+        settings_window.geometry("350x450")
         settings_window.transient(self.root)
         settings_window.grab_set()
         
-        # API Key
-        ttk.Label(settings_window, text="DeepSeek API Key:").pack(pady=5)
-        api_key_entry = ttk.Entry(settings_window, width=40)
-        api_key_entry.insert(0, self.api_key)
-        api_key_entry.pack(pady=5)
+        # 角色选择（下拉菜单）
+        ttk.Label(settings_window, text="角色：").pack(pady=5)
+        styles = self.get_available_styles()
+        style_var = tk.StringVar(value=self.current_style)
+        style_combo = ttk.Combobox(settings_window, textvariable=style_var, values=styles, state="readonly", width=30)
+        style_combo.pack(pady=5)
+        
+        # 添加新角色按钮
+        def add_character():
+            from tkinter import simpledialog
+            name = simpledialog.askstring("添加角色", "输入角色名称：", parent=settings_window)
+            if name and name not in styles:
+                # 创建角色目录
+                new_dir = self.emotions_base / name
+                new_dir.mkdir(parents=True, exist_ok=True)
+                # 更新下拉菜单
+                styles.append(name)
+                style_combo['values'] = styles
+                style_var.set(name)
+                messagebox.showinfo("提示", f"角色 '{name}' 已添加，请在 assets/emotions/{name}/ 中放入头像图片")
+        
+        ttk.Button(settings_window, text="添加新角色", command=add_character).pack(pady=5)
+        
+        # Provider选择
+        ttk.Label(settings_window, text="AI提供商：").pack(pady=5)
+        provider_var = tk.StringVar(value=self.provider)
+        provider_frame = ttk.Frame(settings_window)
+        provider_frame.pack()
+        ttk.Radiobutton(provider_frame, text="DeepSeek", variable=provider_var, value="deepseek").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(provider_frame, text="Ollama (本地)", variable=provider_var, value="ollama").pack(side=tk.LEFT, padx=10)
+        
+        # API URL
+        ttk.Label(settings_window, text="API地址：").pack(pady=5)
+        api_url_entry = ttk.Entry(settings_window, width=40)
+        api_url_entry.insert(0, self.api_url)
+        api_url_entry.pack(pady=5)
+        
+        # Model
+        ttk.Label(settings_window, text="模型名称：").pack(pady=5)
+        model_entry = ttk.Entry(settings_window, width=40)
+        model_entry.insert(0, self.model)
+        model_entry.pack(pady=5)
         
         # 性格设置
         ttk.Label(settings_window, text="AI性格：").pack(pady=5)
@@ -287,14 +343,39 @@ class AICompanion:
         ttk.Checkbutton(settings_window, text="Debug模式（显示情绪标签）", variable=debug_var).pack(pady=5)
         
         def save_settings():
-            self.api_key = api_key_entry.get()
+            self.provider = provider_var.get()
+            self.api_url = api_url_entry.get()
+            self.model = model_entry.get()
             self.personality = personality_entry.get()
             self.debug = debug_var.get()
+            
+            # 更新角色风格
+            new_style = style_var.get()
+            if new_style != self.current_style:
+                self.current_style = new_style
+                self.load_emotion(self.current_emotion)
+                # 更新系统提示词并插入角色切换提示
+                self.messages[0]["content"] = self.get_system_prompt()
+                new_name = new_style.capitalize()
+                self.messages.append({"role": "system", "content": f"你现在是{new_name}了，请用新身份继续对话。"})
+                self.display_message("系统", f"角色已切换为 {new_name}")
+            
+            # 根据provider设置默认值
+            if self.provider == "ollama":
+                self.api_key = ""
+                if not self.api_url or "deepseek" in self.api_url:
+                    self.api_url = "http://localhost:11434/v1/chat/completions"
+                if not self.model or "deepseek" in self.model:
+                    self.model = "qwen3:4b"
+            
             # 更新系统提示词
             self.messages[0]["content"] = self.get_system_prompt()
             # 保存到配置文件
-            self.config["api_key"] = self.api_key
+            self.config["provider"] = self.provider
+            self.config["api_url"] = self.api_url
+            self.config["model"] = self.model
             self.config["personality"] = self.personality
+            self.config["character_style"] = self.current_style
             self.config["debug"] = self.debug
             config_path = Path(__file__).parent.parent / "config.json"
             with open(config_path, "w", encoding="utf-8") as f:
@@ -303,15 +384,6 @@ class AICompanion:
             messagebox.showinfo("提示", "设置已保存！")
         
         ttk.Button(settings_window, text="保存", command=save_settings).pack(pady=10)
-
-    def change_avatar(self):
-        """更换头像目录"""
-        from tkinter import filedialog
-        folder = filedialog.askdirectory(title="选择头像文件夹")
-        if folder:
-            self.assets_dir = Path(folder)
-            self.load_emotion(self.current_emotion)
-            messagebox.showinfo("提示", f"头像目录已更换到：{folder}")
 
 def main():
     root = tk.Tk()
